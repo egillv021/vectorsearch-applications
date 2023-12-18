@@ -4,7 +4,7 @@ from prompt_templates import question_answering_prompt_series, question_answerin
 from openai_interface import GPT_Turbo
 from app_features import (convert_seconds, generate_prompt_series, search_result,
                           validate_token_threshold, load_content_cache, load_guests, 
-                          load_topic_lookup, load_topics_list, run_hybrid_search, update_index)
+                          load_topic_lookup, load_topics_list, run_hybrid_search, update_index, get_models)
 from reranker import ReRanker
 from loguru import logger 
 import streamlit as st
@@ -30,11 +30,9 @@ data_path = './data/impact_theory_data.json'
 if 'weaviate_client' not in st.session_state:
     st.session_state['api_key'] = os.environ['WEAVIATE_API_KEY']
     st.session_state['url'] = os.environ['WEAVIATE_ENDPOINT']
-    st.session_state['model_name'] = 'models/finetuned-bge-base-en-v1.5-300/'
-    st.session_state['class_name'] = 'Impact_theory_bge_finetuned_256'
     st.session_state['limit'] = 3
     st.session_state['alpha'] = 0.25
-    st.session_state['weaviate_client'] = WeaviateClient(st.session_state['api_key'], st.session_state['url'], model_name_or_path=st.session_state['model_name'])
+    st.session_state['weaviate_client'] = WeaviateClient(st.session_state['api_key'], st.session_state['url'])
 
 ## RERANKER
 #maybe pick multiple rerankers
@@ -56,13 +54,15 @@ if 'all_classes' not in st.session_state:
 
 ## Topcis
 # topics for each episode generated using Topic_Modeling_with_Llama2.ipynb
+# This was suppose to be my Ace used for filtering and stuff 
+# but I built it into my index which you don't have access to so I had to remove the filter
+# but you can see it in the episode metadata at least.
 if 'topics_lookup' not in st.session_state:
     json_file_path = 'topics.json'
     st.session_state['topic_lookup'] = load_topic_lookup(json_file_path)
-    st.session_state['all_topics'] = load_topics_list()
 
 if 'doc_lookup' not in st.session_state:
-    st.session_state['doc_lookup'] = load_content_cache('processed_data/finetuned-bge-base-en-v1.5-256.parquet')
+    st.session_state['doc_lookup'] = load_content_cache("content_cache.json")
 
 #creates list of guests for sidebar
 if 'guest_list' not in st.session_state:
@@ -75,17 +75,23 @@ if 'guest_list' not in st.session_state:
 def main():
     with st.sidebar:
         guest = st.selectbox('Select a guest:', options=st.session_state['guest_list'], index=None, placeholder='Select a Guest')
-        topic = st.sidebar.selectbox(label='Select a topic:', options=st.session_state['all_topics'], index=None, placeholder="Select a Topic")
+        # I had to remove this filter because I relized I had built it into my index which you do not have access to,
+        # and this was suppose to be me trying to be clever.... So now it's just displayed in the episode metadata
+        #topic = st.sidebar.selectbox(label='Select a topic:', options=st.session_state['all_topics'], index=None, placeholder="Select a Topic")
+        topic = None
 
     with st.sidebar.expander("Search configurations", expanded=False):
         with st.form("my_form"):
-            class_name = st.selectbox(label='Pick an index:', options=st.session_state['all_classes'], index=2)
+            if "models" not in st.session_state:
+                st.session_state['models'] = get_models() #assumes you have a models directory
+            model = st.selectbox(label='Pick a model:', options=st.session_state['models'], index=None)
+            class_name = st.selectbox(label='Pick an index:', options=st.session_state['all_classes'], index=None)
             alpha = st.slider(label='Value of alpha:', min_value=0.0, max_value=1.0, value=0.25, step=0.05)
             limit = st.slider(label="Number of documents to return:", min_value=1, max_value=5, value=3, step=1)
             temperature = st.slider(label="LLM temperature: ", min_value=0.0, max_value=2.0, value=0.1, step=0.1)
             submitted = st.form_submit_button("Submit")
             if submitted:
-                update_index(class_name, limit, alpha, temperature)
+                update_index(class_name, limit, alpha, temperature, model)
     col_logo, col_text, _ = st.columns([2,5,2])
     with col_logo:
         st.image('./assets/echo_of_impact.png', width=250)
@@ -97,6 +103,8 @@ def main():
 
     col1, _ = st.columns([8,2])
     with col1:
+        if 'class_name' not in st.session_state:
+            st.error("Please start setting up the search configuration in the sidebar")
 
         if query:
             with st.chat_message("user"):
@@ -165,12 +173,12 @@ def main():
             st.subheader("Search Results")
             for i, hit in enumerate(valid_response):
                 col1, col2 = st.columns([8, 2], gap='large')
-                document_data = st.session_state['doc_lookup'][hit['doc_id']]
-                topic = st.session_state['topic_lookup'][document_data['video_id']]
-                image = document_data['thumbnail_url'] # get thumbnail_url
-                episode_url = document_data['episode_url']# get episode_url
-                title = document_data['title']# get title
-                show_length = document_data['length']# get length
+                #document_data = st.session_state['doc_lookup'][hit['doc_id']]
+                topic = st.session_state['topic_lookup'][hit['video_id']]
+                image = hit['thumbnail_url'] # get thumbnail_url
+                episode_url = hit['episode_url']# get episode_url
+                title = hit['title']# get title
+                show_length = hit['length']# get length
                 time_string = convert_seconds(show_length) # convert show_length to readable time string
             ##############
             #  END CODE  #
@@ -179,7 +187,7 @@ def main():
                     st.write(search_result(    
                                             i=i, 
                                             url=episode_url,
-                                            guest=document_data['guest'],
+                                            guest=hit['guest'],
                                             topic=topic,
                                             title=title,
                                             content=hit['content'], 
